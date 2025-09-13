@@ -1,0 +1,198 @@
+<!DOCTYPE html>
+<html xmlns:th="http://www.thymeleaf.org">
+<head>
+    <title>Mapa de Pontos de Ônibus</title>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+
+    <!-- CSS do Leaflet -->
+    <link rel="stylesheet" href="https://unpkg.com/leaflet/dist/leaflet.css" />
+    <!-- CSS do MarkerCluster -->
+    <link rel="stylesheet" href="https://unpkg.com/leaflet.markercluster/dist/MarkerCluster.css" />
+    <link rel="stylesheet" href="https://unpkg.com/leaflet.markercluster/dist/MarkerCluster.Default.css" />
+
+    <style>
+        #map {
+            height: 600px;
+            width: 100%;
+        }
+        .info {
+            padding: 6px 8px;
+            font: 14px/16px Arial, Helvetica, sans-serif;
+            background: white;
+            background: rgba(255,255,255,0.8);
+            box-shadow: 0 0 15px rgba(0,0,0,0.2);
+            border-radius: 5px;
+        }
+        .info h4 {
+            margin: 0 0 5px;
+            color: #777;
+        }
+        .loading {
+            color: #0078ff;
+        }
+        .error {
+            color: #ff0000;
+        }
+    </style>
+</head>
+<body>
+<h1>Mapa de Pontos de Ônibus do Rio de Janeiro</h1>
+<div id="map"></div>
+
+<!-- JS do Leaflet -->
+<script src="https://unpkg.com/leaflet/dist/leaflet.js"></script>
+<!-- JS do MarkerCluster -->
+<script src="https://unpkg.com/leaflet.markercluster/dist/leaflet.markercluster.js"></script>
+
+<script>
+    // Configurações
+    const CONFIG = {
+        MIN_ZOOM: 10,
+        MAX_POINTS: 2000,
+        REQUEST_DELAY: 500,
+        CLUSTER_RADIUS: 50
+    };
+
+    // Inicializa o mapa
+    var map = L.map('map').setView([-22.908333, -43.196388], 11);
+
+    // Adiciona o mapa base (OpenStreetMap)
+    L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+        attribution: '© OpenStreetMap contributors'
+    }).addTo(map);
+
+    // Inicializa o cluster de marcadores
+    var markers = L.markerClusterGroup({
+        maxClusterRadius: CONFIG.CLUSTER_RADIUS,
+        chunkedLoading: true,
+        chunkInterval: 100,
+        spiderfyOnMaxZoom: true,
+        showCoverageOnHover: false,
+        zoomToBoundsOnClick: true
+    });
+
+    map.addLayer(markers);
+
+    // Variáveis para controle
+    var isLoading = false;
+    var lastRequestTime = 0;
+
+    // Painel de informações
+    var info = L.control({position: 'topright'});
+    info.onAdd = function (map) {
+        this._div = L.DomUtil.create('div', 'info');
+        this.update('Move o mapa para carregar pontos');
+        return this._div;
+    };
+
+    info.update = function (message, type) {
+        const className = type === 'error' ? 'error' : (type === 'loading' ? 'loading' : '');
+        this._div.innerHTML = '<h4>Pontos de Ônibus</h4>' +
+            '<div class="' + className + '">' + message + '</div>';
+    };
+
+    info.addTo(map);
+
+    // Função para verificar se a resposta é válida
+    function isValidResponse(data) {
+        return data && data.features && Array.isArray(data.features);
+    }
+
+    // Carregar Pontos Por Bounds com controle
+    function loadPointsByBounds() {
+        const now = Date.now();
+        if (isLoading || (now - lastRequestTime) < CONFIG.REQUEST_DELAY) {
+            return;
+        }
+
+        const bounds = map.getBounds();
+        const zoom = map.getZoom();
+
+        if (zoom < CONFIG.MIN_ZOOM) {
+            info.update("Zoom mais próximo para ver pontos");
+            markers.clearLayers();
+            return;
+        }
+
+        isLoading = true;
+        lastRequestTime = now;
+        info.update("Carregando pontos...", "loading");
+
+        const minLat = bounds.getSouth();
+        const minLon = bounds.getWest();
+        const maxLat = bounds.getNorth();
+        const maxLon = bounds.getEast();
+
+        fetch(`http://localhost:8084/api/stops/paginated?minLat=${minLat}&minLon=${minLon}&maxLat=${maxLat}&maxLon=${maxLon}`)
+            .then(response => {
+                if (!response.ok) {
+                    throw new Error(`HTTP error! status: ${response.status}`);
+                }
+                return response.json();
+            })
+            .then(data => {
+                // Verifica se a resposta é válida
+                if (!isValidResponse(data)) {
+                    throw new Error('Resposta inválida do servidor');
+                }
+
+                // Limpa marcadores existentes antes de adicionar novos
+                markers.clearLayers();
+
+                // Adiciona novos marcadores ao cluster
+                const newMarkers = [];
+                data.features.forEach(feature => {
+                    if (feature.geometry && feature.geometry.coordinates && feature.properties) {
+                        const [lon, lat] = feature.geometry.coordinates;
+                        const marker = L.marker([lat, lon]);
+
+                        marker.bindPopup(`
+                            <b>${feature.properties.stop_name || 'N/A'}</b><br>
+                            ID: ${feature.properties.stop_id || 'N/A'}
+                        `);
+
+                        newMarkers.push(marker);
+                    }
+                });
+
+                if (newMarkers.length > 0) {
+                    markers.addLayers(newMarkers);
+                    info.update(`${newMarkers.length} pontos carregados`);
+                } else {
+                    info.update("Nenhum ponto encontrado nesta área");
+                }
+
+                isLoading = false;
+            })
+            .catch(error => {
+                console.error('Erro ao carregar pontos:', error);
+                info.update("Erro ao carregar pontos: " + error.message, "error");
+                isLoading = false;
+            });
+    }
+
+    // Debounced version of loadPointsByBounds
+    function debouncedLoadPoints() {
+        clearTimeout(window.debounceTimer);
+        window.debounceTimer = setTimeout(loadPointsByBounds, 300);
+    }
+
+    // Event listeners
+    map.on('moveend', debouncedLoadPoints);
+    map.on('zoomend', function() {
+        const zoom = map.getZoom();
+        if (zoom < CONFIG.MIN_ZOOM) {
+            markers.clearLayers();
+            info.update("Zoom mais próximo para ver pontos");
+        } else {
+            debouncedLoadPoints();
+        }
+    });
+
+    // Carrega pontos iniciais
+    debouncedLoadPoints();
+
+</script>
+</body>
+</html>

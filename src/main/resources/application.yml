@@ -1,0 +1,9 @@
+server:
+  port: ${SERVER_PORT}
+spring:
+  thymeleaf:
+    cache: false
+  data:
+    mongodb:
+      uri: ${MONGO_DB_URI}
+      database: ${MONGO_DB_DATABASE}
